@@ -258,6 +258,192 @@ export function createFinalizeWorkflow(params: FinalizeOnlyParams): WorkflowDefi
   }
 }
 
+// ==========================================
+// 4. 一键完成工作流 (写稿→修稿→审稿→修复→定稿→下一章)
+// ==========================================
+
+/**
+ * 自动合并修稿/修复版的 pending revision 到对应的草稿。
+ * 在一键工作流中跳过 UI 三栏合并视图，直接接受 AI 的输出。
+ */
+export async function autoMergeRevision(
+  draftPath: string,
+  newContent: string,
+  callbacks: { log: (msg: string) => void },
+): Promise<void> {
+  const { ipc } = await import('../ipc-client')
+  const { parseDraftMeta } = await import('./chapter-workflow')
+  const baseDraft = await parseDraftMeta(draftPath)
+  if (!baseDraft) {
+    callbacks.log('  ⚠️ 无法定位草稿元数据，跳过自动合并')
+    return
+  }
+  const pending = (await ipc.invoke('db:revision-get-pending', baseDraft.id)) as Array<{ id: number }>
+  if (pending.length === 0) return
+  const latest = pending[pending.length - 1]
+  await ipc.invoke('db:revision-mark-merged', latest.id, baseDraft.id)
+  await ipc.invoke('db:draft-update-content', baseDraft.id, newContent, newContent.length)
+}
+
+export function createOneClickCompleteWorkflow(chapterInfo: ChapterInfo): WorkflowDefinition {
+  return {
+    type: 'chapter_creation',
+    title: `⚡ 一键完成 — 第${chapterInfo.chapterNumber}章 · ${chapterInfo.title}`,
+    steps: [
+      {
+        name: '写草稿',
+        description: '基于架构+蓝图+上下文生成初稿',
+        executor: async (step, context, callbacks) => {
+          context.data.autoMode = true
+          const { GenerateDraftCommand } = await import('./commands/generate-draft.command')
+          const cmd = new GenerateDraftCommand(chapterInfo)
+          const result = await cmd.execute({ step, context, callbacks })
+          return `📝 草稿已生成（${(result || '').length} 字）`
+        },
+      },
+      {
+        name: 'AI修稿',
+        description: '润色草稿并自动合并',
+        executor: async (step, context, callbacks) => {
+          const { RefineDraftCommand } = await import('./commands/refine-draft.command')
+          const draftContent = context.data.draftContent as string
+          const draftPath = context.data.draftPath as string
+          const chapterNumber = context.data.chapterNumber as number
+          const ci = context.data.chapterInfo as ChapterInfo
+          if (!draftContent || !draftPath) throw new Error('缺少草稿数据')
+
+          callbacks.log('  正在润色草稿...')
+          await new RefineDraftCommand({ draftPath, draftContent, chapterNumber, chapterInfo: ci }).execute({ step, context, callbacks })
+
+          const refinedContent = context.data.refined as string
+          if (!refinedContent) throw new Error('修稿结果为空')
+
+          await autoMergeRevision(draftPath, refinedContent, callbacks)
+          context.data.draftContent = refinedContent
+          callbacks.log('  ✅ 修稿已自动合并')
+          return `🔧 修稿完成并自动合并`
+        },
+      },
+      {
+        name: 'AI审稿',
+        description: '一致性检查并生成审稿报告',
+        executor: async (step, context, callbacks) => {
+          const { ReviewChapterCommand } = await import('./commands/review-chapter.command')
+          const { ipc } = await import('../ipc-client')
+          const draftContent = context.data.draftContent as string
+          const draftPath = context.data.draftPath as string
+          const chapterNumber = context.data.chapterNumber as number
+          if (!draftContent || !draftPath) throw new Error('缺少草稿数据')
+
+          callbacks.log('  正在进行一致性审查...')
+          await new ReviewChapterCommand({ draftPath, draftContent, chapterNumber }).execute({ step, context, callbacks })
+
+          // 从 DB 读取最新审稿报告
+          const { parseDraftMeta } = await import('./chapter-workflow')
+          const baseDraft = await parseDraftMeta(draftPath)
+          if (baseDraft) {
+            const latestReview = await ipc.invoke('db:review-get-latest', baseDraft.id) as { content: string } | null
+            if (latestReview) context.data.reviewReport = latestReview.content
+          }
+          callbacks.log('  ✅ 审稿完成')
+          return `🔍 审稿完成`
+        },
+      },
+      {
+        name: '审稿修复',
+        description: '根据审稿报告精准修复并自动合并',
+        executor: async (step, context, callbacks) => {
+          const { RefineFromReviewCommand } = await import('./commands/refine-from-review.command')
+          const draftContent = context.data.draftContent as string
+          const draftPath = context.data.draftPath as string
+          const chapterNumber = context.data.chapterNumber as number
+          const reviewReport = context.data.reviewReport as string
+          if (!draftContent || !draftPath || !reviewReport) throw new Error('缺少审稿修复所需数据')
+
+          callbacks.log('  正在根据审稿报告修复...')
+          await new RefineFromReviewCommand({ draftPath, draftContent, reviewReport, chapterNumber }).execute({ step, context, callbacks })
+
+          const fixContent = context.data.refined as string
+          if (fixContent) {
+            await autoMergeRevision(draftPath, fixContent, callbacks)
+            context.data.draftContent = fixContent
+            callbacks.log('  ✅ 审稿修复已自动合并')
+          }
+          return `🔧 审稿修复完成`
+        },
+      },
+      {
+        name: '定稿',
+        description: '标记定稿并执行后处理流水线',
+        executor: async (step, context, callbacks) => {
+          const { FinalizeChapterCommand } = await import('./commands/finalize-chapter.command')
+          const draftContent = context.data.draftContent as string
+          const draftPath = context.data.draftPath as string
+          const chapterNumber = context.data.chapterNumber as number
+          const ci = context.data.chapterInfo as ChapterInfo
+          if (!draftContent || !draftPath) throw new Error('缺少定稿所需数据')
+
+          await new FinalizeChapterCommand({ draftPath, draftContent, chapterNumber, chapterInfo: ci }).execute({ step, context, callbacks })
+          callbacks.log('  ✅ 定稿完成')
+          return `✅ 第${chapterNumber}章定稿完成`
+        },
+      },
+      {
+        name: '进入下一章',
+        description: '自动继续下一章的一键完成流水线',
+        executor: async (_step, context, callbacks) => {
+          const { ipc } = await import('../ipc-client')
+          const chapterNumber = context.data.chapterNumber as number
+          const nextChapter = chapterNumber + 1
+
+          // 读取下一章蓝图信息
+          let nextInfo = { chapterNumber: nextChapter, title: '', role: '发展', purpose: '', characters: [] as string[], keyEvents: '', userGuidance: '' } as ChapterInfo
+          try {
+            const bp = await ipc.invoke('db:blueprint-get', nextChapter) as Record<string, unknown> | null
+            if (bp) {
+              nextInfo = {
+                chapterNumber: nextChapter,
+                title: String(bp.title || ''),
+                role: String(bp.role || '发展'),
+                purpose: String(bp.purpose || ''),
+                characters: Array.isArray(bp.characters) ? bp.characters as string[] : [],
+                keyEvents: String(bp.keyEvents || ''),
+                userGuidance: String(bp.userGuidance || ''),
+              }
+            }
+          } catch { /* 无下一章蓝图 */ }
+
+          // 检查下一章蓝图是否存在，不存在则停止
+          if (!nextInfo.title) {
+            callbacks.log(`📖 无第${nextChapter}章蓝图，停止自动续写`)
+            return '无下一章蓝图'
+          }
+
+          callbacks.log(`📖 自动启动第${nextChapter}章一键完成流水线...`)
+
+          // 连续写稿时给主进程 2 秒喘息窗口：清理数据库连接缓存 + GC
+          // 防止 better-sqlite3 同步操作累积阻塞主进程 IPC
+          callbacks.log(`  ⏳ 等待 2 秒后启动下一章...`)
+          await new Promise(resolve => setTimeout(resolve, 2000))
+
+          // 启动下一章的一键完成工作流（不等待，让新工作流在后台独立运行）
+          callbacks.log(`🚀 第${nextChapter}章一键完成已启动`)
+          const { useWorkflowStore } = await import('../../stores/workflow-store')
+          useWorkflowStore.getState().startWorkflow(
+            createOneClickCompleteWorkflow(nextInfo),
+            false
+          )
+          return `自动进入第${nextChapter}章`
+        },
+      },
+    ],
+    onComplete: {
+      mode: 'open',
+      message: `🎉 第${chapterInfo.chapterNumber}章一键完成！`,
+    },
+  }
+}
+
 /**
  * 修复定稿后处理工作流 — 当定稿后的三路推演失败时可重跑
  * 从 manuscript/ 读取已定稿内容，重新执行 FinalizeChapterCommand 的后处理部分

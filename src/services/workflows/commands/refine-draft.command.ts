@@ -47,7 +47,15 @@ export class RefineDraftCommand extends BaseWorkflowCommand<string> {
       .withWordNumber(project.novelConfig.wordsPerChapter)
       .withUserRefinePrompt(userPromptBlock)
 
-    const refined = await this.callLLMWithBuilder(promptBuilder, callbacks)
+    const wordLimit = project.novelConfig.wordsPerChapter || 3000
+    const prompt = promptBuilder.build()
+    const refined = await this.callLLM(
+      prompt + `\n\n【⚠️ 字数硬限制（必须遵守！）】精修后的正文总字数不得超过 ${wordLimit} 字。如果原文超出字数，请果断删减冗余描述。输出超过 ${wordLimit} 字属于违规。`,
+      promptBuilder.getSystemRole(),
+      callbacks,
+      undefined,
+      context
+    )
     const cleanRefined = this.stripThinkingTags(refined)
 
     const { parseDraftMeta } = await import('../chapter-workflow')
@@ -70,18 +78,20 @@ export class RefineDraftCommand extends BaseWorkflowCommand<string> {
       wordCount: cleanRefined.length,
     }) as { success: boolean; id: number }
 
-    const { useEditorStore } = await import('../../../stores/editor-store')
-    useEditorStore.getState().openFile({
-      id: `diff-${this.params.draftPath}-${createRes.id}`,
-      name: `修稿合并：第${this.params.chapterNumber}章`,
-      type: 'diff',
-      filePath: this.params.draftPath,
-      originalContent: this.params.draftContent,
-      content: cleanRefined,
-      revisionPath: String(createRes.id),
-      chapterNumber: this.params.chapterNumber,
-      chapterDir: `vela://draft/ch${this.params.chapterNumber}`,
-    })
+    if (!context?.data?.autoMode) {
+      const { useEditorStore } = await import('../../../stores/editor-store')
+      useEditorStore.getState().openFile({
+        id: `diff-${this.params.draftPath}-${createRes.id}`,
+        name: `修稿合并：第${this.params.chapterNumber}章`,
+        type: 'diff',
+        filePath: this.params.draftPath,
+        originalContent: this.params.draftContent,
+        content: cleanRefined,
+        revisionPath: String(createRes.id),
+        chapterNumber: this.params.chapterNumber,
+        chapterDir: `vela://draft/ch${this.params.chapterNumber}`,
+      })
+    }
 
     context.data.refined = cleanRefined
     context.data.refinedPath = this.params.draftPath

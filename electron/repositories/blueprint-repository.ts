@@ -92,7 +92,9 @@ export class BlueprintRepository {
     /** 插入或更新蓝图 */
     static upsert(data: BlueprintData): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('数据库未初始化 - 无法保存蓝图')
+
+        console.log(`[BlueprintRepository] 保存第 ${data.chapterNumber} 章: ${data.title}`)
 
         db.prepare(`
       INSERT INTO blueprints (
@@ -127,7 +129,9 @@ export class BlueprintRepository {
     /** 批量插入/更新蓝图（事务） */
     static upsertMany(items: BlueprintData[]): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('数据库未初始化 - 无法批量保存蓝图')
+
+        console.log(`[BlueprintRepository] 批量保存 ${items.length} 章蓝图`)
 
         const tx = db.transaction(() => {
             for (const item of items) {
@@ -135,12 +139,13 @@ export class BlueprintRepository {
             }
         })
         tx()
+        console.log(`[BlueprintRepository] 批量保存完成`)
     }
 
     /** 删除蓝图 */
     static delete(chapterNumber: number): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('数据库未初始化 - 无法删除蓝图')
 
         db.prepare('DELETE FROM blueprints WHERE chapter_number = ?').run(chapterNumber)
     }
@@ -148,7 +153,7 @@ export class BlueprintRepository {
     /** 仅更新 notes 字段 */
     static updateNotes(chapterNumber: number, notes: string): void {
         const db = getProjectDb()
-        if (!db) return
+        if (!db) throw new Error('数据库未初始化 - 无法更新笔记')
 
         db.prepare(`
       UPDATE blueprints

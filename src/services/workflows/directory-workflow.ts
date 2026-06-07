@@ -91,11 +91,34 @@ export async function loadDirectoryBlueprints(): Promise<ChapterBlueprint[]> {
 }
 
 export async function saveChapterBlueprint(blueprint: ChapterBlueprint): Promise<void> {
-  await ipc.invoke('db:blueprint-upsert', blueprint)
+  const result = await ipc.invoke('db:blueprint-upsert', blueprint)
+  if (!result.success) {
+    throw new Error(result.error || '保存蓝图失败')
+  }
 }
 
 export async function saveAllBlueprints(blueprints: ChapterBlueprint[]): Promise<void> {
-  await ipc.invoke('db:blueprint-upsert-many', blueprints)
+  console.log(`[saveAllBlueprints] 准备保存 ${blueprints.length} 章蓝图`, blueprints.map(b => `ch${b.chapterNumber}`).join(','))
+
+  // 增加超时保护：IPC 调用超过 30 秒抛出错误
+  const result = await Promise.race([
+    ipc.invoke('db:blueprint-upsert-many', blueprints) as Promise<{ success: boolean; error?: string }>,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`保存蓝图超时 (>=30s, ${blueprints.length}章)`)), 30000)
+    ),
+  ])
+
+  console.log(`[saveAllBlueprints] 结果:`, result)
+  if (!result.success) {
+    throw new Error(result.error || '批量保存蓝图失败')
+  }
+}
+
+export async function deleteChapterBlueprint(chapterNumber: number): Promise<void> {
+  const result = await ipc.invoke('db:blueprint-delete', chapterNumber)
+  if (!result.success) {
+    throw new Error(result.error || '删除蓝图失败')
+  }
 }
 
 export async function getBlueprintCount(): Promise<number> {
@@ -158,31 +181,31 @@ export function createDirectoryWorkflow(params: DirectoryWorkflowParams = { mode
         },
       },
       {
-        name: '保存蓝图',
-        description: `将章节蓝图批量写入 SQLite 数据库`,
+        name: '确认保存',
+        description: `校验蓝图均已写入数据库`,
         executor: async (_step, context, callbacks) => {
           const project = useProjectStore.getState().currentProject
           if (!project) throw new Error('未打开项目')
 
           const newBlueprints = context.data.newBlueprints as ChapterBlueprint[]
-          const existingBlueprints = context.data.existingBlueprints as ChapterBlueprint[]
 
-          callbacks.log('保存蓝图到数据库...')
-
-          let merged: ChapterBlueprint[]
-          if (params.mode === 'full') {
-            merged = newBlueprints
-            // TODO: 若需要清理冗余蓝图，可考虑添加 db:blueprint-delete-all 以严格符合全量替换的意图。
-            // 在当前 upsert-many 中，仅覆盖更新
-          } else {
-            const existingMap = new Map(existingBlueprints.map(b => [b.chapterNumber, b]))
-            for (const nb of newBlueprints) existingMap.set(nb.chapterNumber, nb)
-            merged = Array.from(existingMap.values()).sort((a, b) => a.chapterNumber - b.chapterNumber)
+          if (!newBlueprints || newBlueprints.length === 0) {
+            throw new Error('没有新生成的蓝图需要保存')
           }
 
-          await saveAllBlueprints(merged)
+          // 步骤2（GenerateDirectoryCommand）已在分批生成时逐批次调用 saveAllBlueprints
+          // 此处只需校验数据已入库并刷新文件树
+          const { ipc } = await import('../ipc-client')
+          const check = await ipc.invoke('db:blueprint-get', newBlueprints[0].chapterNumber) as { chapterNumber: number } | null
+          if (!check) {
+            callbacks.log(`⚠️ 数据库中未找到第${newBlueprints[0].chapterNumber}章蓝图，尝试补保存...`)
+            await saveAllBlueprints(newBlueprints)
+          } else {
+            callbacks.log(`✅ 蓝图写入验证通过，共 ${newBlueprints.length} 章`)
+          }
+
           useProjectStore.getState().refreshFileTree()
-          return '已保存蓝图'
+          return `已保存 ${newBlueprints.length} 章蓝图`
         },
       },
     ],

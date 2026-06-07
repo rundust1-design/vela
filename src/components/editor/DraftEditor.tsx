@@ -201,6 +201,36 @@ export default function DraftEditor({ filePath, content }: Props) {
     }
   }
 
+  /** 一键完成：修稿→审稿→审稿修复→定稿 */
+  const doOneClickComplete = async () => {
+    if (!currentProject || !meta) return
+    const { guardChapterWriting } = await import('../../services/workflow-guards')
+    const guard = await guardChapterWriting(meta.chapterNumber)
+    if (!guard.ok) { toast.warning(guard.message || '前置条件未满足'); return }
+    try {
+      const { useWorkflowStore } = await import('../../stores/workflow-store')
+      const { createOneClickCompleteWorkflow } = await import('../../services/workflows/chapter-workflow')
+      // 从蓝图读取章节信息
+      const bps = await ipc.invoke('db:blueprint-get-all')
+      const bp = bps.find(b => b.chapterNumber === meta!.chapterNumber)
+
+      useWorkflowStore.getState().startWorkflow(
+        createOneClickCompleteWorkflow({
+          chapterNumber: meta.chapterNumber,
+          title: meta.chapterTitle ?? '未知标题',
+          role: (bp?.role as string) ?? '发展',
+          purpose: (bp?.purpose as string) ?? '',
+          characters: Array.isArray(bp?.characters) ? bp.characters as string[] : [],
+          keyEvents: (bp?.keyEvents as string) ?? '',
+          userGuidance: (bp?.userGuidance as string) ?? '',
+        }),
+        false
+      )
+    } catch (e) {
+      toast.error(`一键完成启动失败：${e}`)
+    }
+  }
+
   /** 修复定稿后处理 — 只重跑失败的步骤 */
   const doRepairFinalize = useCallback(async () => {
     if (!meta || isChapterBusy) return
@@ -408,6 +438,18 @@ export default function DraftEditor({ filePath, content }: Props) {
             >
               <Search size={12} />
               AI 审稿
+            </Button>
+
+            {/* 一键完成（从修稿到定稿） */}
+            <Button
+              variant="ai"
+              size="sm"
+              onClick={doOneClickComplete}
+              disabled={isChapterBusy}
+              title="修稿→审稿→修复→定稿→下一章"
+            >
+              <Sparkles size={12} />
+              一键完成
             </Button>
 
             {/* 定稿 */}

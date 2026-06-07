@@ -2,7 +2,7 @@ import { BaseWorkflowCommand, CommandExecuteParams } from './base-command'
 import { useProjectStore } from '../../../stores/project-store'
 import { getPromptTemplate } from '../../prompt-templates'
 import { DirectoryPromptBuilder } from '../../prompts/prompt-builder'
-import { DirectoryWorkflowParams, ChapterBlueprint, parseTextBlueprints, saveAllBlueprints } from '../directory-workflow'
+import { DirectoryWorkflowParams, ChapterBlueprint, parseTextBlueprints } from '../directory-workflow'
 
 export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBlueprint[]> {
   constructor(private params: DirectoryWorkflowParams) {
@@ -93,17 +93,32 @@ export class GenerateDirectoryCommand extends BaseWorkflowCommand<ChapterBluepri
       const parsed = parseTextBlueprints(resultText, cursor, endChapter)
       newBlueprints.push(...parsed)
 
+      console.log(`[directory.command] 批次完成: LLM返回长度=${resultText.length}, 解析出=${parsed.length}章, 累计=${newBlueprints.length}章`)
+
       // ==== 批次入库 ====
       if (parsed.length > 0) {
-        await saveAllBlueprints(parsed)
-        useProjectStore.getState().refreshFileTree()
+        callbacks.log(`  💾 正在保存 ${parsed.length} 章到数据库...`)
+        callbacks.log(`    章节: ${parsed.map(p => `#${p.chapterNumber} ${p.title}`).join(', ')}`)
+        const { saveAllBlueprints } = await import('../directory-workflow')
+        try {
+          await saveAllBlueprints(parsed)
+          callbacks.log(`  ✅ 批次保存成功`)
+          useProjectStore.getState().refreshFileTree()
+        } catch (err) {
+          callbacks.log(`  ❌ 批次保存失败: ${err}`)
+          throw err
+        }
+      } else {
+        callbacks.log(`  ⚠️ 第 ${cursor}-${batchEnd} 批次没有解析到有效章节，跳过保存`)
+        // 打印 AI 返回的前200字符用作调试
+        callbacks.log(`  AI返回(前200): ${resultText.slice(0, 200)}`)
       }
 
       // 计算本次实际生成到的最大章节号，推进游标到已生成的最后一章之后
       const actualMaxChapter = parsed.length > 0
         ? Math.max(...parsed.map(p => p.chapterNumber))
         : batchEnd
-      callbacks.log(`  ✅ 第 ${cursor}–${actualMaxChapter} 章完成（${parsed.length} 章）并已保存入库`)
+      callbacks.log(`  ✅ 第 ${cursor}–${actualMaxChapter} 章完成（${parsed.length} 章）`)
 
       cursor = actualMaxChapter + 1
     }

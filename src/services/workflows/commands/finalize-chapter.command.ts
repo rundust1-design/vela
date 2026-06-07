@@ -36,6 +36,16 @@ async function callLLMForPostProcess(
 
   return new Promise<string>((resolve, reject) => {
     let fullContent = ''
+    let resolved = false
+
+    const TIMEOUT_MS = 300_000 // 5 分钟
+    const timeoutTimer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true
+        reject(new Error(`后处理 LLM 请求超时 (>=${TIMEOUT_MS / 1000}s)`))
+      }
+    }, TIMEOUT_MS)
+
     llmStore.generateStream(
       [
         { role: 'system', content: builder.getSystemRole() },
@@ -44,10 +54,18 @@ async function callLLMForPostProcess(
       {
         onChunk: (chunk) => { fullContent += chunk; callbacks.appendText(chunk) },
         onDone: (text) => {
+          if (resolved) return
+          resolved = true
+          clearTimeout(timeoutTimer)
           const raw = text || fullContent
           resolve(stripThinkingTags(raw))
         },
-        onError: (err) => reject(new Error(err || '流式生成失败')),
+        onError: (err) => {
+          if (resolved) return
+          resolved = true
+          clearTimeout(timeoutTimer)
+          reject(new Error(err || '流式生成失败'))
+        },
       },
       undefined,
       options,

@@ -4,7 +4,7 @@ import { useProjectStore } from '../../stores/project-store'
 import { useLLMStore } from '../../stores/llm-store'
 import { useWorkflowStore } from '../../stores/workflow-store'
 
-import { createChapterWorkflow } from '../../services/workflows/chapter-workflow'
+import { createChapterWorkflow, createOneClickCompleteWorkflow } from '../../services/workflows/chapter-workflow'
 import { guardChapterWriting } from '../../services/workflow-guards'
 import { ipc } from '../../services/ipc-client'
 import { toast } from '../ui/Toast'
@@ -190,6 +190,39 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
     onClose()
   }
 
+  const handleOneClickComplete = async () => {
+    if (!defaultModelId) {
+      addLog('error', '⚠️ 请先配置 AI 模型')
+      return
+    }
+    if (!currentProject) return
+    if (isChapterRunning) {
+      toast.warning('已有章节创作任务正在执行，请等待完成后再试')
+      return
+    }
+
+    const targetChapter = Number(chapterNumber) || 1
+    const guard = await guardChapterWriting(targetChapter)
+    if (!guard.ok) {
+      setGuardError(guard.message || '前置条件未满足')
+      return
+    }
+    setGuardError(null)
+    await saveParams()
+
+    startWorkflow(createOneClickCompleteWorkflow({
+      chapterNumber: Number(chapterNumber) || 1,
+      title: title || `第${chapterNumber || 1}章`,
+      role,
+      purpose,
+      characters: characters.split(/[、,，]/).map(s => s.trim()).filter(Boolean),
+      keyEvents,
+      userGuidance,
+      knowledgeQueryHint: knowledgeHint.trim() || undefined,
+    }), false)
+    onClose()
+  }
+
   const handleOpenChange = (open: boolean) => {
     // 如果正在生成中，禁止通过点击外部或 ESC 关闭
     if (!open && !isChapterRunning) onClose()
@@ -313,11 +346,11 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
 
             <DialogFooter className="sm:justify-between items-center">
               <span className="text-xs mt-2 sm:mt-0" style={{ color: 'var(--color-text-muted)' }}>
-                流程：一键写稿（修稿/审稿后续在工具栏处理）
+                仅写稿在草稿箱工具栏继续修稿/审稿/定稿
               </span>
               <div className="flex items-center gap-2">
                 <Button variant="outline" onClick={onClose}>取消</Button>
-                <Button variant="ai" size="lg" onClick={handleStart} disabled={isChapterRunning}>
+                <Button variant="outline" size="lg" onClick={handleStart} disabled={isChapterRunning}>
                   {isChapterRunning ? (
                     <span className="flex items-center gap-2">
                       <span className="animate-spin" style={{ filter: 'brightness(1.5)' }}>🌀</span>
@@ -326,7 +359,20 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
                   ) : (
                     <span className="flex items-center gap-2">
                       <Play size={13} />
-                      开始创作
+                      仅写稿
+                    </span>
+                  )}
+                </Button>
+                <Button variant="ai" size="lg" onClick={handleOneClickComplete} disabled={isChapterRunning}>
+                  {isChapterRunning ? (
+                    <span className="flex items-center gap-2">
+                      <span className="animate-spin" style={{ filter: 'brightness(1.5)' }}>🌀</span>
+                      执行中...
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-2">
+                      <Sparkles size={13} />
+                      一键完成
                     </span>
                   )}
                 </Button>

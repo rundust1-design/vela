@@ -35,6 +35,13 @@ export abstract class BaseWorkflowCommand<TResult = string> {
       let fullContent = ''
       let streamRequestId = ''
 
+      // 超时保护：防止 LLM 无限等待
+      const TIMEOUT_MS = 300_000 // 5 分钟
+      const timeoutTimer = setTimeout(() => {
+        cleanup()
+        reject(new Error(`LLM 请求超时 (>=${TIMEOUT_MS / 1000}s)`))
+      }, TIMEOUT_MS)
+
       // 取消监听：轮询 context.cancelled，主动中断 LLM 流
       let cancelCheckTimer: ReturnType<typeof setInterval> | null = null
       if (context) {
@@ -49,6 +56,7 @@ export abstract class BaseWorkflowCommand<TResult = string> {
       }
 
       const cleanup = () => {
+        clearTimeout(timeoutTimer)
         if (cancelCheckTimer) {
           clearInterval(cancelCheckTimer)
           cancelCheckTimer = null

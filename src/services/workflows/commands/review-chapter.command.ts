@@ -18,7 +18,7 @@ export class ReviewChapterCommand extends BaseWorkflowCommand<string> {
     super()
   }
 
-  async execute({ callbacks }: CommandExecuteParams): Promise<string> {
+  async execute({ context, callbacks }: CommandExecuteParams): Promise<string> {
     const project = useProjectStore.getState().currentProject
     if (!project) throw new Error('未打开项目')
 
@@ -93,18 +93,20 @@ export class ReviewChapterCommand extends BaseWorkflowCommand<string> {
     // EditorArea 渲染 ReviewReport 的条件：activeTab.content 存在
     const reportContent = JSON.stringify(parsedResult, null, 2)
 
-    const { useEditorStore } = await import('../../../stores/editor-store')
-    const pseudoReviewPath = `vela://draft/ch${this.params.chapterNumber}/v${baseVersion}/review${revIndex}`
-    useEditorStore.getState().openFile({
-      id: `review-${this.params.draftPath}-${revIndex}`,
-      name: `审稿报告：第${this.params.chapterNumber}章`,
-      type: 'review-report',
-      content: reportContent,
-      filePath: this.params.draftPath,
-      reportPath: pseudoReviewPath,
-      reviewReport: reportContent,
-      chapterNumber: this.params.chapterNumber,
-    })
+    if (!context?.data?.autoMode) {
+      const { useEditorStore } = await import('../../../stores/editor-store')
+      const pseudoReviewPath = `vela://draft/ch${this.params.chapterNumber}/v${baseVersion}/review${revIndex}`
+      useEditorStore.getState().openFile({
+        id: `review-${this.params.draftPath}-${revIndex}`,
+        name: `审稿报告：第${this.params.chapterNumber}章`,
+        type: 'review-report',
+        content: reportContent,
+        filePath: this.params.draftPath,
+        reportPath: pseudoReviewPath,
+        reviewReport: reportContent,
+        chapterNumber: this.params.chapterNumber,
+      })
+    }
 
     callbacks.log(`✅ 审查完成，已生成审稿报告 r${revIndex}`)
     return reviewResultClean

@@ -58,10 +58,13 @@ export function registerDatabaseController() {
   })
 
   ipcMain.handle('db:blueprint-upsert-many', async (_event, items: BlueprintData[]) => {
+    console.log(`[IPC] db:blueprint-upsert-many 收到 ${items?.length || 0} 条数据`)
     try {
       BlueprintRepository.upsertMany(items)
+      console.log(`[IPC] db:blueprint-upsert-many 成功`)
       return { success: true }
     } catch (err) {
+      console.error(`[IPC] db:blueprint-upsert-many 失败:`, err)
       return { success: false, error: String(err) }
     }
   })
@@ -69,6 +72,15 @@ export function registerDatabaseController() {
   ipcMain.handle('db:blueprint-update-notes', async (_event, chapterNumber: number, notes: string) => {
     try {
       BlueprintRepository.updateNotes(chapterNumber, notes)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('db:blueprint-delete', async (_event, chapterNumber: number) => {
+    try {
+      BlueprintRepository.delete(chapterNumber)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }

@@ -11,6 +11,7 @@ import {
   loadDirectoryBlueprints,
   saveChapterBlueprint,
   saveAllBlueprints,
+  deleteChapterBlueprint,
   createDirectoryWorkflow,
   type ChapterBlueprint,
   type DirectoryWorkflowParams,
@@ -100,10 +101,16 @@ export default function ChapterCardEditor() {
   const handleSaveOne = async () => {
     if (!currentProject || !selected) return
     setSaving(true)
-    await saveChapterBlueprint(selected)
-    setSaving(false)
-    setDirty(false)
-    addLog('info', `✅ 第 ${selected.chapterNumber} 章蓝图已保存`)
+    try {
+      await saveChapterBlueprint(selected)
+      setSaving(false)
+      setDirty(false)
+      addLog('info', `✅ 第 ${selected.chapterNumber} 章蓝图已保存`)
+    } catch (err) {
+      setSaving(false)
+      addLog('error', `❌ 保存失败: ${err}`)
+      toast.error('保存失败: ' + String(err))
+    }
   }
 
   /** 全量保存（每章写入独立 JSON 文件） */
@@ -145,10 +152,19 @@ export default function ChapterCardEditor() {
       danger: true,
     })
     if (!ok) return
-    const newList = blueprints.filter((_, i) => i !== selectedIdx)
-    setBlueprints(newList)
-    setSelectedIdx(Math.max(0, selectedIdx - 1))
-    setDirty(true)
+
+    try {
+      // 从数据库删除
+      await deleteChapterBlueprint(selected.chapterNumber)
+      // 从本地状态移除
+      const newList = blueprints.filter((_, i) => i !== selectedIdx)
+      setBlueprints(newList)
+      setSelectedIdx(Math.max(0, selectedIdx - 1))
+      addLog('info', `✅ 第 ${selected.chapterNumber} 章蓝图已删除`)
+    } catch (err) {
+      addLog('error', `❌ 删除失败: ${err}`)
+      toast.error('删除失败: ' + String(err))
+    }
   }
 
   /** 触发蓝图批量生成（来自 DirectoryConfigDialog 的确认回调） */
@@ -242,6 +258,39 @@ export default function ChapterCardEditor() {
             >
               <PenLine size={12} />
               写作第{nextWriteChapter}章
+            </Button>
+          )}
+          {/* 一键完成（下一章） */}
+          {nextWriteChapter !== null && (
+            <Button
+              variant="ai"
+              size="sm"
+              onClick={async () => {
+                const bp = blueprints.find(b => b.chapterNumber === nextWriteChapter)
+                if (!bp) return
+                const { useWorkflowStore } = await import('../../stores/workflow-store')
+                const { createOneClickCompleteWorkflow } = await import('../../services/workflows/chapter-workflow')
+                const { guardChapterWriting } = await import('../../services/workflow-guards')
+                const guard = await guardChapterWriting(nextWriteChapter)
+                if (!guard.ok) { toast.warning(guard.message || '前置条件未满足'); return }
+                useWorkflowStore.getState().startWorkflow(
+                  createOneClickCompleteWorkflow({
+                    chapterNumber: bp.chapterNumber,
+                    title: bp.title || '',
+                    role: bp.role,
+                    purpose: bp.purpose,
+                    characters: bp.characters || [],
+                    keyEvents: bp.keyEvents || '',
+                    suspenseHook: bp.suspenseHook,
+                    userGuidance: bp.userGuidance || '',
+                  }),
+                  false
+                )
+              }}
+              title="一键完成写稿、修稿、审稿、定稿全流程"
+            >
+              <Sparkles size={12} />
+              一键完成
             </Button>
           )}
           {/* AI 生成蓝图 → 弹出 DirectoryConfigDialog */}
@@ -351,14 +400,43 @@ export default function ChapterCardEditor() {
                 <div className="flex items-center gap-1.5">
                   {/* 仅下一章允许写作 */}
                   {nextWriteChapter !== null && selected.chapterNumber === nextWriteChapter && (
-                    <Button
-                      variant="ai"
-                      size="sm"
-                      onClick={() => handleWriteChapter(selected)}
-                      title="以当前蓝图信息生成草稿"
-                    >
-                      <PenLine size={12} /> 写作此章
-                    </Button>
+                    <>
+                      <Button
+                        variant="ai"
+                        size="sm"
+                        onClick={() => handleWriteChapter(selected)}
+                        title="以当前蓝图信息生成草稿"
+                      >
+                        <PenLine size={12} /> 仅写稿
+                      </Button>
+                      <Button
+                        variant="ai"
+                        size="sm"
+                        onClick={async () => {
+                          const { useWorkflowStore } = await import('../../stores/workflow-store')
+                          const { createOneClickCompleteWorkflow } = await import('../../services/workflows/chapter-workflow')
+                          const { guardChapterWriting } = await import('../../services/workflow-guards')
+                          const guard = await guardChapterWriting(selected.chapterNumber)
+                          if (!guard.ok) { toast.warning(guard.message || '前置条件未满足'); return }
+                          useWorkflowStore.getState().startWorkflow(
+                            createOneClickCompleteWorkflow({
+                              chapterNumber: selected.chapterNumber,
+                              title: selected.title || '',
+                              role: selected.role,
+                              purpose: selected.purpose,
+                              characters: selected.characters || [],
+                              keyEvents: selected.keyEvents || '',
+                              suspenseHook: selected.suspenseHook,
+                              userGuidance: selected.userGuidance || '',
+                            }),
+                            false
+                          )
+                        }}
+                        title="一键完成写稿→修稿→审稿→定稿→下一章"
+                      >
+                        <Sparkles size={12} /> 一键完成
+                      </Button>
+                    </>
                   )}
                   <Button variant="ghost" size="icon" onClick={handleDeleteChapter} title="删除此章">
                     <Trash2 size={13} style={{ color: 'var(--color-text-muted)' }} />

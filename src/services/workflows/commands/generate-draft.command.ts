@@ -106,9 +106,16 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
       callbacks.log(`⚠️ Prompt 预估 ${estimatedTokens} tokens，超出预算 ${TOKEN_BUDGET}，请考虑精简上下文`)
     }
 
-    callbacks.log('调用 AI 生成章节草稿...')
+    callbacks.log(`调用 AI 生成章节草稿 (目标字数: ${project.novelConfig.wordsPerChapter || 3000})...`)
 
-    const draftText = await this.callLLMWithBuilder(promptBuilder, callbacks)
+    // 强制追加硬性字数约束（builder 的模板替换可能不够强，此处追加确保 LLM 严格遵守）
+    const wordLimit = project.novelConfig.wordsPerChapter || 3000
+    const finalPrompt = prompt + `\n\n【⚠️ 字数硬限制（必须遵守！）】
+你生成的正文总字数不得超过 ${wordLimit} 字。如果你写了超过 ${wordLimit} 字，这是一个严重错误。
+你的输出将直接发布为小说正文，必须严格遵守字数上限。
+重要：写完核心内容后如果字数已接近 ${wordLimit} 字，请立刻收尾断章。`
+
+    const draftText = await this.callLLM(finalPrompt, promptBuilder.getSystemRole(), callbacks, undefined, context)
     const cleanDraftText = this.stripThinkingTags(draftText)
 
     // 落于数据库
@@ -138,14 +145,16 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
     } catch { /* 忽略 */ }
 
     try {
-      const { useEditorStore } = await import('../../../stores/editor-store')
-      useEditorStore.getState().openFile({
-        id: pseudoPath,
-        name: `第${this.chapterInfo.chapterNumber}章 ${this.chapterInfo.title} v${nextVersion}`,
-        type: 'chapter',
-        filePath: pseudoPath,
-        content: cleanDraftText,
-      })
+      if (!context?.data?.autoMode) {
+        const { useEditorStore } = await import('../../../stores/editor-store')
+        useEditorStore.getState().openFile({
+          id: pseudoPath,
+          name: `第${this.chapterInfo.chapterNumber}章 ${this.chapterInfo.title} v${nextVersion}`,
+          type: 'chapter',
+          filePath: pseudoPath,
+          content: cleanDraftText,
+        })
+      }
     } catch { /* 忽略 */ }
 
     callbacks.log(`✅ 草稿已自动入库保存为版本 v${nextVersion}（${draftText.length} 字）`)
