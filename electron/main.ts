@@ -1,4 +1,7 @@
 import { app, BrowserWindow } from 'electron'
+
+// 禁用 GPU 加速，防止 Chromium 合成器崩溃导致黑屏
+app.disableHardwareAcceleration()
 import { registerIPCHandlers } from './ipc-handlers'
 import { registerMCPHandlers } from './mcp/mcp-ipc-bridge'
 
