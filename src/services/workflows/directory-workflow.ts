@@ -35,42 +35,81 @@ export interface DirectoryWorkflowParams {
 // 2. 蓝图文件访问与工具函数
 // ==========================================
 
+/**
+ * 尝试修复常见 JSON 格式错误：key 与 value 之间漏了冒号
+ * 例如 "keyEvents陈渡趁夜色..." → "keyEvents":"陈渡趁夜色..."
+ */
+function tryRepairJSON(text: string): string {
+  // 修复对象属性 key 与 value 之间缺失冒号的情况
+  // 匹配模式: "keyName"后面紧跟着文本（没有冒号）
+  let repaired = text.replace(/"([a-zA-Z_]\w*)"(?=\s*[\["{a-zA-Z一-鿿])/g, '"$1":')
+  // 修复 key 没有引号的情况
+  repaired = repaired.replace(/([{,]\s*)([a-zA-Z_]\w*)(\s*:\s*)/g, '$1"$2"$3')
+  return repaired
+}
+
 export function parseTextBlueprints(content: string, startNum: number, endNum: number): ChapterBlueprint[] {
   let result: ChapterBlueprint[] = []
+
+  const tryParse = (jsonStr: string): ChapterBlueprint[] | null => {
+    const startIndex = jsonStr.indexOf('{')
+    const endIndex = jsonStr.lastIndexOf('}')
+
+    if (startIndex === -1 || endIndex === -1) return null
+
+    const arrayStr = jsonStr.substring(startIndex, endIndex + 1)
+    let parsed
+    try {
+      parsed = JSON.parse(arrayStr)
+    } catch {
+      return null // 需要修复
+    }
+
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.blueprints) {
+      parsed = parsed.blueprints
+    }
+    if (!Array.isArray(parsed)) return null
+
+    return parsed
+      .filter((p: Record<string, unknown>) => {
+        const n = Number(p.chapterNumber || p.chapter_number)
+        return n >= startNum && n <= endNum
+      })
+      .map((p: Record<string, unknown>) => ({
+        ...EMPTY_BLUEPRINT,
+        chapterNumber: Number(p.chapterNumber || p.chapter_number || 0),
+        title: String(p.title || `第${p.chapterNumber}章`),
+        role: String(p.role || '发展'),
+        purpose: String(p.purpose || ''),
+        keyEvents: String(p.keyEvents || p.key_events || ''),
+        characters: Array.isArray(p.characters) ? p.characters : [],
+        suspenseHook: String(p.suspenseHook || p.suspense_hook || ''),
+        userGuidance: '',
+      }))
+  }
 
   try {
     const cleanContent = stripThinkingTags(content)
     const jsonStr = cleanContent.replace(/```json?\n?/g, '').replace(/```\n?/g, '').trim()
-    const startIndex = jsonStr.indexOf('{')
-    const endIndex = jsonStr.lastIndexOf('}')
 
-    if (startIndex !== -1 && endIndex !== -1) {
-      const arrayStr = jsonStr.substring(startIndex, endIndex + 1)
-      let parsed = JSON.parse(arrayStr)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.blueprints) {
-        parsed = parsed.blueprints
-      }
-      if (Array.isArray(parsed)) {
+    // 第一次尝试：直接解析
+    let parsed = tryParse(jsonStr)
+    if (parsed) {
+      result = parsed
+    } else {
+      // 第二次尝试：修复常见 JSON 格式错误后重试
+      console.log('[parseTextBlueprints] 初次解析失败，尝试修复 JSON 格式...')
+      const repaired = tryRepairJSON(jsonStr)
+      parsed = tryParse(repaired)
+      if (parsed) {
+        console.log('[parseTextBlueprints] 修复后解析成功')
         result = parsed
-          .filter((p: Record<string, unknown>) => {
-            const n = Number(p.chapterNumber || p.chapter_number)
-            return n >= startNum && n <= endNum
-          })
-          .map((p: Record<string, unknown>) => ({
-            ...EMPTY_BLUEPRINT,
-            chapterNumber: Number(p.chapterNumber || p.chapter_number || 0),
-            title: String(p.title || `第${p.chapterNumber}章`),
-            role: String(p.role || '发展'),
-            purpose: String(p.purpose || ''),
-            keyEvents: String(p.keyEvents || p.key_events || ''),
-            characters: Array.isArray(p.characters) ? p.characters : [],
-            suspenseHook: String(p.suspenseHook || p.suspense_hook || ''),
-            userGuidance: '',
-          }))
+      } else {
+        console.error('[parseTextBlueprints] 修复后仍解析失败', jsonStr.slice(0, 500))
       }
     }
   } catch {
-    console.error('Failed to parse blueprint JSON', content)
+    console.error('[parseTextBlueprints] 意外异常', content.slice(0, 500))
   }
 
   const distinctMap = new Map<number, ChapterBlueprint>()
@@ -98,15 +137,9 @@ export async function saveChapterBlueprint(blueprint: ChapterBlueprint): Promise
 }
 
 export async function saveAllBlueprints(blueprints: ChapterBlueprint[]): Promise<void> {
-  console.log(`[saveAllBlueprints] 准备保存 ${blueprints.length} 章蓝图`, blueprints.map(b => `ch${b.chapterNumber}`).join(','))
+  console.log(`[saveAllBlueprints] 保存 ${blueprints.length} 章`, blueprints.map(b => `ch${b.chapterNumber}`).join(','))
 
-  // 增加超时保护：IPC 调用超过 30 秒抛出错误
-  const result = await Promise.race([
-    ipc.invoke('db:blueprint-upsert-many', blueprints) as Promise<{ success: boolean; error?: string }>,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`保存蓝图超时 (>=30s, ${blueprints.length}章)`)), 30000)
-    ),
-  ])
+  const result = await ipc.invoke('db:blueprint-upsert-many', blueprints) as { success: boolean; error?: string }
 
   console.log(`[saveAllBlueprints] 结果:`, result)
   if (!result.success) {
@@ -181,31 +214,40 @@ export function createDirectoryWorkflow(params: DirectoryWorkflowParams = { mode
         },
       },
       {
-        name: '确认保存',
-        description: `校验蓝图均已写入数据库`,
+        name: '保存蓝图',
+        description: `将章节蓝图写入 SQLite 数据库`,
         executor: async (_step, context, callbacks) => {
           const project = useProjectStore.getState().currentProject
           if (!project) throw new Error('未打开项目')
 
           const newBlueprints = context.data.newBlueprints as ChapterBlueprint[]
+          const existingBlueprints = context.data.existingBlueprints as ChapterBlueprint[]
 
           if (!newBlueprints || newBlueprints.length === 0) {
             throw new Error('没有新生成的蓝图需要保存')
           }
 
-          // 步骤2（GenerateDirectoryCommand）已在分批生成时逐批次调用 saveAllBlueprints
-          // 此处只需校验数据已入库并刷新文件树
-          const { ipc } = await import('../ipc-client')
-          const check = await ipc.invoke('db:blueprint-get', newBlueprints[0].chapterNumber) as { chapterNumber: number } | null
-          if (!check) {
-            callbacks.log(`⚠️ 数据库中未找到第${newBlueprints[0].chapterNumber}章蓝图，尝试补保存...`)
-            await saveAllBlueprints(newBlueprints)
+          // 如果是追加模式，合并新旧蓝图
+          let merged: ChapterBlueprint[]
+          if (params.mode === 'full') {
+            merged = newBlueprints
           } else {
-            callbacks.log(`✅ 蓝图写入验证通过，共 ${newBlueprints.length} 章`)
+            const existingMap = new Map(existingBlueprints.map(b => [b.chapterNumber, b]))
+            for (const nb of newBlueprints) existingMap.set(nb.chapterNumber, nb)
+            merged = Array.from(existingMap.values()).sort((a, b) => a.chapterNumber - b.chapterNumber)
           }
 
+          callbacks.log(`保存 ${merged.length} 章蓝图到数据库...`)
+
+          try {
+            await saveAllBlueprints(merged)
+            callbacks.log(`✅ 蓝图保存成功`)
+          } catch (err) {
+            callbacks.log(`❌ 蓝图保存失败: ${err}`)
+            throw err
+          }
           useProjectStore.getState().refreshFileTree()
-          return `已保存 ${newBlueprints.length} 章蓝图`
+          return `已保存 ${merged.length} 章蓝图`
         },
       },
     ],
