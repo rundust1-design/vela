@@ -421,10 +421,10 @@ export function createOneClickCompleteWorkflow(chapterInfo: ChapterInfo): Workfl
 
           callbacks.log(`📖 自动启动第${nextChapter}章一键完成流水线...`)
 
-          // 连续写稿时给主进程 2 秒喘息窗口：清理数据库连接缓存 + GC
-          // 防止 better-sqlite3 同步操作累积阻塞主进程 IPC
-          callbacks.log(`  ⏳ 等待 2 秒后启动下一章...`)
-          await new Promise(resolve => setTimeout(resolve, 2000))
+          // 连续写稿时给主进程 5 秒喘息窗口：清理数据库连接缓存 + GC
+          // 防止连续 LLM 调用和同步数据库操作累积阻塞主进程 IPC
+          callbacks.log(`  ⏳ 等待 5 秒后启动下一章...`)
+          await new Promise(resolve => setTimeout(resolve, 5000))
 
           // 启动下一章的一键完成工作流（不等待，让新工作流在后台独立运行）
           callbacks.log(`🚀 第${nextChapter}章一键完成已启动`)

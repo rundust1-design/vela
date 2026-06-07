@@ -126,7 +126,8 @@ export function buildFinalizePostProcessSteps(
 
   // ─── 步骤 2: 本章剧情要点提取 ─────────────────────────────────────
   const notesTemplate = getPromptTemplate('generate_chapter_notes')
-  if (notesTemplate) {
+  if (notesTemplate && chapterNumber % 5 === 1) {
+    // 一键完成模式下仅每5章提取一次章节要点，避免连续 LLM 调用压垮主进程
     steps.push({
       key: 'chapter_notes',
       label: '📋 章节剧情要点',
@@ -148,7 +149,8 @@ export function buildFinalizePostProcessSteps(
 
   // ─── 步骤 3: 角色状态更新 ────────────────────────────────────────
   const cardTemplate = getPromptTemplate('update_character_cards')
-  if (cardTemplate) {
+  if (cardTemplate && chapterNumber % 5 === 2) {
+    // 一键完成模式下仅每5章更新一次角色状态，避免连续 LLM 调用压垮主进程
     steps.push({
       key: 'character_cards',
       label: '🎭 角色状态更新',
