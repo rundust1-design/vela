@@ -36,16 +36,89 @@ export interface DirectoryWorkflowParams {
 // ==========================================
 
 /**
- * 尝试修复常见 JSON 格式错误：key 与 value 之间漏了冒号
- * 例如 "keyEvents陈渡趁夜色..." → "keyEvents":"陈渡趁夜色..."
+ * 当 JSON.parse 失败时，使用正则逐条提取章节数据。
+ * 能容忍 LLM 输出的各种畸形 JSON 格式。
  */
-function tryRepairJSON(text: string): string {
-  // 修复对象属性 key 与 value 之间缺失冒号的情况
-  // 匹配模式: "keyName"后面紧跟着文本（没有冒号）
-  let repaired = text.replace(/"([a-zA-Z_]\w*)"(?=\s*[\["{a-zA-Z一-鿿])/g, '"$1":')
-  // 修复 key 没有引号的情况
-  repaired = repaired.replace(/([{,]\s*)([a-zA-Z_]\w*)(\s*:\s*)/g, '$1"$2"$3')
-  return repaired
+function extractBlueprintsByRegex(rawText: string, startNum: number, endNum: number): ChapterBlueprint[] {
+  const results: ChapterBlueprint[] = []
+
+  // 用正则拆分每个章节对象
+  // 匹配从 { 到下一个 { 或结尾之间的内容
+  const chapterBlocks: string[] = []
+  let braceDepth = 0
+  let currentBlock = ''
+  let inString = false
+  let escape = false
+
+  for (let i = 0; i < rawText.length; i++) {
+    const ch = rawText[i]
+    currentBlock += ch
+
+    if (escape) { escape = false; continue }
+    if (ch === '\\') { escape = true; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (inString) continue
+
+    if (ch === '{') {
+      braceDepth++
+      if (braceDepth === 1 && currentBlock.length > 1) {
+        // 上一个块结束，开始新块
+        currentBlock = ch
+      }
+    } else if (ch === '}') {
+      braceDepth--
+      if (braceDepth === 0) {
+        chapterBlocks.push(currentBlock)
+        currentBlock = ''
+      }
+    }
+  }
+
+  for (const block of chapterBlocks) {
+    // 逐字段提取（容忍各种缺失）
+    const extract = (key: string): string => {
+      // 匹配 "key": value 或 "key": "value" 或 "key":value 等各种变形
+      const patterns = [
+        new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, 'i'),     // "key": "value"
+        new RegExp(`"${key}"\\s*:\\s*(\\d+)`, 'i'),                        // "key": 123
+        new RegExp(`"${key}"\\s*:\\s*\\[([^\\]]*)\\]`, 'i'),              // "key": [...]
+        new RegExp(`"${key}"\\s*"((?:[^"\\\\]|\\\\.)*)"`, 'i'),           // "key""value"（漏冒号）
+        new RegExp(`"${key}"\\s*:\\s*([^,}\\]]+)`, 'i'),                  // "key": value（宽松）
+      ]
+      for (const p of patterns) {
+        const m = block.match(p)
+        if (m) return m[1].trim()
+      }
+      return ''
+    }
+
+    const extractArray = (key: string): string[] => {
+      // 匹配 "key": ["a", "b", "c"] 或 "key":["a","b","c"]
+      const m = block.match(new RegExp(`"${key}"\\s*:?\\s*\\[([^\\]]*)\\]`, 'i'))
+      if (!m) return []
+      return m[1].split(',').map(s => s.trim().replace(/^"|"$/g, '')).filter(Boolean)
+    }
+
+    const chNumStr = extract('chapterNumber') || extract('chapter_number')
+    const chapterNumber = parseInt(chNumStr) || 0
+    if (chapterNumber < startNum || chapterNumber > endNum) continue
+    if (results.some(r => r.chapterNumber === chapterNumber)) continue // 去重
+
+    results.push({
+      chapterNumber,
+      title: extract('title') || `第${chapterNumber}章`,
+      role: extract('role') || '发展',
+      purpose: extract('purpose') || '',
+      keyEvents: extract('keyEvents') || extract('key_events') || '',
+      characters: extractArray('characters'),
+      suspenseHook: extract('suspenseHook') || extract('suspense_hook') || '',
+      userGuidance: '',
+      notes: '',
+      notesUpdatedAt: '',
+    })
+  }
+
+  return results.sort((a, b) => a.chapterNumber - b.chapterNumber)
 }
 
 export function parseTextBlueprints(content: string, startNum: number, endNum: number): ChapterBlueprint[] {
@@ -92,20 +165,18 @@ export function parseTextBlueprints(content: string, startNum: number, endNum: n
     const cleanContent = stripThinkingTags(content)
     const jsonStr = cleanContent.replace(/```json?\n?/g, '').replace(/```\n?/g, '').trim()
 
-    // 第一次尝试：直接解析
+    // 第一次尝试：直接 JSON.parse
     let parsed = tryParse(jsonStr)
     if (parsed) {
       result = parsed
     } else {
-      // 第二次尝试：修复常见 JSON 格式错误后重试
-      console.log('[parseTextBlueprints] 初次解析失败，尝试修复 JSON 格式...')
-      const repaired = tryRepairJSON(jsonStr)
-      parsed = tryParse(repaired)
-      if (parsed) {
-        console.log('[parseTextBlueprints] 修复后解析成功')
-        result = parsed
+      // 回退方案：正则逐条提取（能容忍各种畸形 JSON）
+      console.log('[parseTextBlueprints] JSON解析失败，使用正则逐条提取...')
+      result = extractBlueprintsByRegex(jsonStr, startNum, endNum)
+      if (result.length > 0) {
+        console.log(`[parseTextBlueprints] 正则提取成功: ${result.length}章`)
       } else {
-        console.error('[parseTextBlueprints] 修复后仍解析失败', jsonStr.slice(0, 500))
+        console.error('[parseTextBlueprints] 正则提取也失败', jsonStr.slice(0, 300))
       }
     }
   } catch {
