@@ -42,32 +42,46 @@ export interface DirectoryWorkflowParams {
 function extractBlueprintsByRegex(rawText: string, startNum: number, endNum: number): ChapterBlueprint[] {
   const results: ChapterBlueprint[] = []
 
-  // 用正则拆分每个章节对象
-  // 匹配从 { 到下一个 { 或结尾之间的内容
+  // 用括号深度匹配提取每个章节对象
+  // 由于 LLM 输出通常是 {"blueprints": [{...}, {...}]} 这种结构，
+  // 我们需要跳过最外层的 {，只提取内部的章节块
+  // 策略: 先去掉最外层结构，找到 "blueprints":[ 或直接取数组内容
+  let innerText = rawText
+
+  // 尝试去掉外层 {"blueprints": [...]} 结构
+  const outerMatch = rawText.match(/\{[\s\S]*?"blueprints"\s*:\s*\[([\s\S]*?)\]?\s*\}?\s*$/i)
+  if (outerMatch) {
+    innerText = '[' + outerMatch[1]
+    // 如果数组没有闭合，补上 ]
+    if (!innerText.endsWith(']')) innerText += ']'
+  }
+
   const chapterBlocks: string[] = []
   let braceDepth = 0
   let currentBlock = ''
   let inString = false
   let escape = false
 
-  for (let i = 0; i < rawText.length; i++) {
-    const ch = rawText[i]
-    currentBlock += ch
+  for (let i = 0; i < innerText.length; i++) {
+    const ch = innerText[i]
 
-    if (escape) { escape = false; continue }
-    if (ch === '\\') { escape = true; continue }
-    if (ch === '"') { inString = !inString; continue }
-    if (inString) continue
+    if (escape) { escape = false; currentBlock += ch; continue }
+    if (ch === '\\') { escape = true; currentBlock += ch; continue }
+    if (ch === '"' && !escape) { inString = !inString; currentBlock += ch; continue }
+    if (inString) { currentBlock += ch; continue }
 
     if (ch === '{') {
-      braceDepth++
-      if (braceDepth === 1 && currentBlock.length > 1) {
-        // 上一个块结束，开始新块
+      if (braceDepth === 0) {
+        // 新的章节块开始
         currentBlock = ch
+      } else {
+        currentBlock += ch
       }
+      braceDepth++
     } else if (ch === '}') {
       braceDepth--
-      if (braceDepth === 0) {
+      currentBlock += ch
+      if (braceDepth === 0 && currentBlock.length > 0) {
         chapterBlocks.push(currentBlock)
         currentBlock = ''
       }
